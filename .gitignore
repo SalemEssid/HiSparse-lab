@@ -1,0 +1,12 @@
+*.pdf
+CLAUDE.md
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Large data (traces are ~18 MB each; keep them out of git)
+data/
+*.npz

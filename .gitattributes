@@ -1,0 +1,4 @@
+# Scripts run on a Linux VM: keep LF line endings even when edited on Windows.
+*.py text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
