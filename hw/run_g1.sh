@@ -8,6 +8,24 @@ cd "$(dirname "$0")/.."
 R=hw/results
 mkdir -p "$R"
 
+# Preflight 1: torch must see the GPU, otherwise every step below fails.
+python - <<'EOF' || { echo "Preflight failed: install a torch build that matches the driver (see requirements.txt)."; exit 1; }
+import sys, torch
+print(f"torch {torch.__version__}, built for CUDA {torch.version.cuda}")
+if not torch.cuda.is_available():
+    sys.exit("CUDA is not available to torch")
+print(f"GPU: {torch.cuda.get_device_name(0)}")
+EOF
+
+# Preflight 2: measurements need an idle GPU, and they would disturb other jobs.
+others=$(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2>/dev/null)
+if [ -n "$others" ] && [ "${FORCE:-0}" != "1" ]; then
+    echo "Other processes are using the GPU:"
+    echo "$others"
+    echo "Re-run when the GPU is idle, or set FORCE=1 to run anyway."
+    exit 1
+fi
+
 echo "== env ==" && python hw/env_report.py --out "$R/env.json" 2>&1 | tee "$R/env.log"
 echo "== bandwidth ==" && python hw/bandwidth.py --out "$R/bandwidth.json" 2>&1 | tee "$R/bandwidth.log"
 echo "== decode Qwen3-4B ==" && python hw/decode_32k.py --model Qwen/Qwen3-4B \

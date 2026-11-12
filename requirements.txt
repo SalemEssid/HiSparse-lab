@@ -1,6 +1,9 @@
-# Install torch first with the CUDA build matching the VM driver, e.g.
-#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+# torch must match the GPU driver, so install it BEFORE this file.
+# The VM's vGPU driver supports CUDA 12.2 (driver 535 branch) and cannot be upgraded
+# from inside the guest. The cu124 build runs on it through CUDA minor-version compatibility:
+#   pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+# The default PyPI torch wheel targets a newer CUDA and fails with "driver too old".
 torch>=2.3
-transformers>=4.51  # first release with Qwen3
+transformers>=4.51,<5  # 4.51 is the first release with Qwen3; the scripts use the 4.x API
 numpy
 psutil
