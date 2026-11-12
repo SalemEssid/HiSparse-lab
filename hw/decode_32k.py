@@ -17,21 +17,19 @@ Usage:
 """
 from __future__ import annotations
 
-import os
+# Do not enable PYTORCH_CUDA_ALLOC_CONF=expandable_segments here: it uses CUDA virtual
+# memory management, which the A40-24Q vGPU rejects ("CUDA driver error: operation not supported").
+import argparse
+import itertools
+import json
+import random
+import statistics
+import subprocess
+import time
+from pathlib import Path
 
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-
-import argparse  # noqa: E402
-import itertools  # noqa: E402
-import json  # noqa: E402
-import random  # noqa: E402
-import statistics  # noqa: E402
-import subprocess  # noqa: E402
-import time  # noqa: E402
-from pathlib import Path  # noqa: E402
-
-import torch  # noqa: E402
-from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache  # noqa: E402
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
 
 GiB = 2**30
 
