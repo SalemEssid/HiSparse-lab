@@ -49,8 +49,9 @@ class Recorder:
         self.cov_rows: list[tuple[int, int, dict]] = []
         self.step = -1
         self.active = False
+        self.sparse_k = 0  # > 0: attention really reads only the first sparse_k ranked pages
 
-    def on_decode(self, layer: int, query: torch.Tensor, key: torch.Tensor, scaling: float) -> None:
+    def on_decode(self, layer: int, query: torch.Tensor, key: torch.Tensor, scaling: float) -> torch.Tensor:
         q, keys = query[0, :, 0], key[0]  # [Hq, D], [Hkv, S, D]
         s = keys.shape[1]
         summ = self.summaries[layer]
@@ -69,6 +70,7 @@ class Recorder:
         if self.cov_every and self.step % self.cov_every == 0:
             probs = attention_probs(q, keys, scaling)
             self.cov_rows.append((self.step, layer, coverage(probs, ub, scaling, self.ks, PAGE)))
+        return r
 
     def coverage_arrays(self) -> dict[str, np.ndarray]:
         if not self.cov_rows:
@@ -86,7 +88,15 @@ def quest_logging_attention(module, query, key, value, attention_mask, **kwargs)
     rec = RECORDER
     if rec is not None and rec.active and query.shape[2] == 1:
         scaling = kwargs.get("scaling")
-        rec.on_decode(module.layer_idx, query, key, scaling if scaling is not None else module.scaling)
+        ranked = rec.on_decode(module.layer_idx, query, key, scaling if scaling is not None else module.scaling)
+        if rec.sparse_k:  # true sparse decoding: read only the tokens of the first sparse_k ranked pages
+            s = key.shape[2]
+            pages = ranked[: rec.sparse_k]
+            idx = (pages[:, None] * PAGE + torch.arange(PAGE, device=key.device)).reshape(-1)
+            idx = torch.sort(idx[idx < s]).values
+            key, value = key[:, :, idx], value[:, :, idx]
+            if attention_mask is not None:
+                attention_mask = attention_mask[..., idx]
     return sdpa_attention_forward(module, query, key, value, attention_mask, **kwargs)
 
 
@@ -328,6 +338,8 @@ def main(argv=None) -> dict:
     ap.add_argument("--summary-dir", default="trace/results")
     ap.add_argument("--smoke", action="store_true", help="tiny random model, random prompt, self-checks on")
     ap.add_argument("--verify", action="store_true", help="re-check page summaries every step (slow)")
+    ap.add_argument("--sparse-k", type=int, default=0,
+                    help="> 0: decode with true sparse attention over the first K ranked pages (trace name S<K>_...)")
     args = ap.parse_args(argv)
 
     global RECORDER
@@ -340,7 +352,7 @@ def main(argv=None) -> dict:
         model, tok = build_tiny_model(device, dtype), None
         g = torch.Generator().manual_seed(args.seed)
         prompt = torch.randint(0, 512, (min(args.target_tokens, 1000),), generator=g).tolist()
-        steps, ks, k_max, k_main = min(args.steps, 60), [2, 4, 8], 8, 4
+        steps, ks, k_max, k_main = min(args.steps, 60), [2, 4, 8], max(8, args.sparse_k), 4
         prompt_info, eos_ids, name = None, set(), "smoke"
         cov_every, verify = 5, True
     else:
@@ -349,13 +361,16 @@ def main(argv=None) -> dict:
         prompt, prompt_info = longbench_prompt(tok, item, args.target_tokens, not args.no_thinking)
         steps, ks, k_max, k_main = args.steps, args.ks, args.k_max, args.k_main
         eos_ids = eos_token_ids(tok, model)
-        name = f"A_{args.model.split('/')[-1].lower()}_lb{args.index:03d}_s{args.seed}"
+        prefix = f"S{args.sparse_k}" if args.sparse_k else "A"
+        name = f"{prefix}_{args.model.split('/')[-1].lower()}_lb{args.index:03d}_s{args.seed}"
         cov_every, verify = args.cov_every, args.verify
     assert k_main in ks, "--k-main must be one of --ks"
+    assert args.sparse_k <= k_max, f"--sparse-k {args.sparse_k} needs at least that many logged pages (k_max {k_max})"
 
     n_layers = model.config.num_hidden_layers
     cap = (len(prompt) + steps) // PAGE + 2
     RECORDER = Recorder(n_layers, steps, k_max, ks, args.aggregate, cov_every, device, verify, cap)
+    RECORDER.sparse_k = args.sparse_k
     sampler = make_sampler(args.temperature, args.top_k, args.top_p, args.seed, device)
     input_ids = torch.tensor([prompt], dtype=torch.long, device=device)
     print(f"[{name}] prompt {len(prompt):,} tokens, up to {steps} steps, {n_layers} layers, device {device}", flush=True)
@@ -370,6 +385,7 @@ def main(argv=None) -> dict:
         "name": name, "model": "tiny-random-qwen3" if args.smoke else args.model, "workload": "smoke" if args.smoke else "A",
         "prompt_tokens": len(prompt), "steps": n, "eos_reached": eos, "page_size": PAGE, "k_max": k_max, "ks": ks,
         "aggregate": args.aggregate, "forced_pages": ["sink page 0", "newest page"], "thinking": not args.no_thinking,
+        "attention": f"sparse, first {args.sparse_k} ranked pages" if args.sparse_k else "full",
         "sampling": {"temperature": args.temperature, "top_k": args.top_k, "top_p": args.top_p}, "seed": args.seed,
         "coverage_every": cov_every, "coverage_samples": int(len(cov.get("step", []))), "prompt_info": prompt_info,
         "prefill_s": prefill_s, "decode_ms_per_step": 1e3 * decode_s / max(n, 1), "commit": git_commit(),

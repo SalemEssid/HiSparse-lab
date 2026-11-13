@@ -119,6 +119,20 @@ def test_smoke_end_to_end():
         assert os.path.exists(os.path.join(tmp, "smoke.md")) and os.path.exists(os.path.join(tmp, "smoke.json"))
 
 
+def test_sparse_mode_traces():
+    # Reading every page (k above the page count) must reproduce the full-attention trace exactly;
+    # reading 2 pages must change the trajectory and therefore the later selections.
+    with tempfile.TemporaryDirectory() as tmp:
+        base = ["--smoke", "--target-tokens", "300", "--steps", "40", "--summary-dir", tmp]
+        full = collect.main(base + ["--out-dir", os.path.join(tmp, "full")])
+        every = collect.main(base + ["--out-dir", os.path.join(tmp, "every"), "--sparse-k", "64"])
+        two = collect.main(base + ["--out-dir", os.path.join(tmp, "two"), "--sparse-k", "2"])
+    w = full["ranked"].shape[2]  # the sparse run logs more pages per step; compare the shared prefix
+    assert np.array_equal(full["ranked"], every["ranked"][:, :, :w])
+    assert not np.array_equal(full["ranked"], two["ranked"][:, :, :w])
+    assert every["meta"]["attention"].startswith("sparse")
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     for name, fn in tests:
