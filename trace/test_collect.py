@@ -71,7 +71,7 @@ def test_ranking_matches_brute_force():
     class Checking(collect.Recorder):
         def on_decode(self, layer, query, key, scaling):
             super().on_decode(layer, query, key, scaling)
-            q, keys = query[0, :, 0].float(), key[0].float()
+            q, keys = query[0, :, 0].float().cpu(), key[0].float().cpu()  # brute force on the CPU
             hq, hkv, s = q.shape[0], keys.shape[0], keys.shape[1]
             n = (s + PAGE - 1) // PAGE
             score = torch.zeros(n)
@@ -80,15 +80,18 @@ def test_ranking_matches_brute_force():
                 for p in range(n):
                     blk = kv[p * PAGE:(p + 1) * PAGE]
                     score[p] += torch.maximum(q[h] * blk.min(0).values, q[h] * blk.max(0).values).sum() * scaling / hq
-            rest = [p for p in torch.argsort(score, descending=True, stable=True).tolist() if p not in (0, n - 1)]
-            expect = ([0, n - 1] if n > 1 else [0]) + rest
-            got = self.ranked[self.step, layer].tolist()
             k = min(self.k_max, n)
-            # Compare as sets beyond the forced pages: ties may order differently.
-            assert got[:2] == expect[:2] and set(got[:k]) == set(expect[:k]), (layer, self.step, got[:k], expect[:k])
+            got = self.ranked[self.step, layer].tolist()[:k]
+            ctx = (layer, self.step, got, score.tolist())
+            assert got[:2] == [0, n - 1], ctx  # forced pages first
+            assert k < n, "test needs fewer selected pages than pages, or the ranking is not tested"
+            chosen, rest = got[2:], [p for p in range(1, n - 1) if p not in got]
+            tol = 1e-4
+            assert all(score[a] >= score[b] - tol for a, b in zip(chosen, chosen[1:])), ctx  # in score order
+            assert min(score[p] for p in chosen) >= max(score[p] for p in rest) - tol, ctx  # the best ones
             checked.append((self.step, layer))
 
-    collect.RECORDER = Checking(3, 12, 8, [2, 4, 8], "mean_logit", 0, DEV)
+    collect.RECORDER = Checking(3, 12, 4, [2, 4], "mean_logit", 0, DEV)  # 4 of 7 pages selected
     ids = torch.randint(0, 512, (1, 97), generator=torch.Generator().manual_seed(2)).to(DEV)
     sampler = collect.make_sampler(0.0, 1, 1.0, 0, DEV)
     tokens, *_ = collect.generate(model, ids, 12, sampler, collect.RECORDER, set())
