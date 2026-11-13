@@ -19,3 +19,13 @@ notes/     lab log
 pip install -r requirements.txt   # install the matching CUDA build of torch first
 bash hw/run_g1.sh                 # writes hw/results/, summary in hw/results/SUMMARY.md
 ```
+
+## Phase 2 traces (GPU machine)
+
+```bash
+bash trace/run_g2.sh              # tests, then LongBench v2 item 0: data/traces/*.npz, trace/results/*.md
+INDEX=7 bash trace/run_g2.sh      # another item
+python trace/collect.py --smoke   # tiny random model, works on CPU
+```
+
+Run the scripts in `trace/` as files, not with `python -m`: the folder name shadows Python's built-in `trace` module.
