@@ -108,12 +108,35 @@ def rank_pages_per_head(ub: torch.Tensor, k: int) -> torch.Tensor:
     return torch.topk(_force(ub, n), min(k, n), dim=-1, sorted=True).indices
 
 
-def attention_probs(q: torch.Tensor, keys: torch.Tensor, scaling: float) -> torch.Tensor:
-    """Exact softmax attention of the current token over all cached tokens, per query head. Returns [Hq, S]."""
+def attention_logits(q: torch.Tensor, keys: torch.Tensor, scaling: float) -> torch.Tensor:
+    """Scaled dot products of the current token's query with every cached key, per query head. Returns [Hq, S]."""
     hq, d = q.shape
     hkv = keys.shape[0]
     logits = torch.einsum("grd,gsd->grs", q.float().reshape(hkv, hq // hkv, d), keys.float()) * scaling
-    return torch.softmax(logits, dim=-1).reshape(hq, -1)
+    return logits.reshape(hq, -1)
+
+
+def attention_probs(q: torch.Tensor, keys: torch.Tensor, scaling: float) -> torch.Tensor:
+    """Exact softmax attention of the current token over all cached tokens, per query head. Returns [Hq, S]."""
+    return torch.softmax(attention_logits(q, keys, scaling), dim=-1)
+
+
+def token_rankings(logits: torch.Tensor, k: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Token-level selections shared by all heads of a layer, best first, the newest token always first.
+
+    by_prob   tokens with the highest attention weight averaged over heads (what an ideal indexer picks)
+    by_logit  tokens with the highest scaled dot product averaged over heads (closer to DSA-style index scores)
+    The newest token's KV is written straight to the GPU, as in HiSparse, so it leads both lists.
+    Returns two int64 tensors of length min(k, S).
+    """
+    s = logits.shape[-1]
+    kk = min(k, s)
+    out = []
+    for score in (torch.softmax(logits, dim=-1).mean(dim=0), logits.mean(dim=0)):
+        score = score.clone()
+        score[s - 1] = _TOP
+        out.append(torch.topk(score, kk, sorted=True).indices)
+    return out[0], out[1]
 
 
 def page_mass(probs: torch.Tensor, page: int = PAGE) -> torch.Tensor:

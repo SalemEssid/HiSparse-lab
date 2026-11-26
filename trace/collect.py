@@ -30,7 +30,9 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from quest import PAGE, PageSummary, attention_probs, coverage, quest_upper_bounds, rank_pages  # noqa: E402
+from quest import (  # noqa: E402
+    PAGE, PageSummary, attention_logits, coverage, quest_upper_bounds, rank_pages, token_rankings,
+)
 
 ATTN_NAME = "quest_logging"
 COV_KEYS = ("quest_logit", "quest_softmax", "quest_head", "page_oracle", "token_oracle")
@@ -50,6 +52,16 @@ class Recorder:
         self.step = -1
         self.active = False
         self.sparse_k = 0  # > 0: attention really reads only the first sparse_k ranked pages
+        self.token_k = 0   # > 0: also log token-level selections (see enable_tokens)
+        self.tok_prob = self.tok_logit = None
+        self.tok_cov_rows: list[tuple[int, int, torch.Tensor, torch.Tensor]] = []
+
+    def enable_tokens(self, k: int, max_steps: int, device) -> None:
+        """Log, at every step and layer, the top-k tokens by mean attention weight and by mean logit."""
+        self.token_k = k
+        shape = (max_steps, self.n_layers, k)
+        self.tok_prob = torch.full(shape, -1, dtype=torch.int32, device=device)
+        self.tok_logit = torch.full(shape, -1, dtype=torch.int32, device=device)
 
     def on_decode(self, layer: int, query: torch.Tensor, key: torch.Tensor, scaling: float) -> torch.Tensor:
         q, keys = query[0, :, 0], key[0]  # [Hq, D], [Hkv, S, D]
@@ -67,9 +79,19 @@ class Recorder:
         ub = quest_upper_bounds(q, *summ.view())
         r = rank_pages(ub, scaling, self.k_max, self.aggregate)
         self.ranked[self.step, layer, : r.numel()] = r.to(torch.int16)
+        logits = by_prob = by_logit = None
+        if self.token_k:
+            logits = attention_logits(q, keys, scaling)
+            by_prob, by_logit = token_rankings(logits, self.token_k)
+            self.tok_prob[self.step, layer, : by_prob.numel()] = by_prob.to(torch.int32)
+            self.tok_logit[self.step, layer, : by_logit.numel()] = by_logit.to(torch.int32)
         if self.cov_every and self.step % self.cov_every == 0:
-            probs = attention_probs(q, keys, scaling)
+            if logits is None:
+                logits = attention_logits(q, keys, scaling)
+            probs = torch.softmax(logits, dim=-1)
             self.cov_rows.append((self.step, layer, coverage(probs, ub, scaling, self.ks, PAGE)))
+            if self.token_k:
+                self.tok_cov_rows.append((self.step, layer, probs[:, by_prob].sum(-1).mean(), probs[:, by_logit].sum(-1).mean()))
         return r
 
     def coverage_arrays(self) -> dict[str, np.ndarray]:
@@ -79,6 +101,9 @@ class Recorder:
                "layer": np.array([r[1] for r in self.cov_rows], np.int32)}
         for k in COV_KEYS:
             out[k] = torch.stack([r[2][k] for r in self.cov_rows]).float().cpu().numpy()
+        if self.tok_cov_rows:  # same (step, layer) order as cov_rows
+            out["tok_prob"] = torch.stack([r[2] for r in self.tok_cov_rows]).float().cpu().numpy()
+            out["tok_logit"] = torch.stack([r[3] for r in self.tok_cov_rows]).float().cpu().numpy()
         return out
 
 
@@ -255,6 +280,8 @@ def step_overlap(ranked: np.ndarray, k: int) -> np.ndarray:
 
 def summarize(ranked: np.ndarray, cov: dict, ks: list[int], k_main: int) -> dict:
     summ = {"k_main": k_main, "coverage_by_k": [], "per_layer_quest_at_k_main": None, "overlap": None}
+    if cov and "tok_prob" in cov:
+        summ["token_coverage"] = {"by_prob": float(cov["tok_prob"].mean()), "by_logit": float(cov["tok_logit"].mean())}
     if cov:
         for j, k in enumerate(ks):
             row = {"k_pages": k, "k_tokens": k * PAGE}
@@ -299,6 +326,10 @@ def summary_markdown(name: str, meta: dict, summ: dict) -> str:
         lines += ["", f"Per layer at k = {summ['k_main']} (Quest shared, mean logit): min {pct(pl.min())}, "
                   f"median {pct(float(np.median(pl)))}, max {pct(pl.max())}; lowest layers "
                   + ", ".join(f"{int(l)} ({pct(pl[l])})" for l in worst) + "."]
+    if summ.get("token_coverage"):
+        tc = summ["token_coverage"]
+        lines += ["", f"Token-level selections (top {meta['token_k']:,} tokens shared by all heads): coverage "
+                  f"{pct(tc['by_prob'])} by attention weight, {pct(tc['by_logit'])} by logit."]
     if summ["overlap"]:
         ov = np.array(summ["overlap"]["per_layer"])
         lines += ["", "## Step-to-step overlap (early locality signal)", "",
@@ -340,6 +371,8 @@ def main(argv=None) -> dict:
     ap.add_argument("--verify", action="store_true", help="re-check page summaries every step (slow)")
     ap.add_argument("--sparse-k", type=int, default=0,
                     help="> 0: decode with true sparse attention over the first K ranked pages (trace name S<K>_...)")
+    ap.add_argument("--token-k", type=int, default=0,
+                    help="> 0: also log the top K tokens per step and layer, by attention weight and by logit (T<K>_...)")
     args = ap.parse_args(argv)
 
     global RECORDER
@@ -361,7 +394,7 @@ def main(argv=None) -> dict:
         prompt, prompt_info = longbench_prompt(tok, item, args.target_tokens, not args.no_thinking)
         steps, ks, k_max, k_main = args.steps, args.ks, args.k_max, args.k_main
         eos_ids = eos_token_ids(tok, model)
-        prefix = f"S{args.sparse_k}" if args.sparse_k else "A"
+        prefix = f"S{args.sparse_k}" if args.sparse_k else (f"T{args.token_k}" if args.token_k else "A")
         name = f"{prefix}_{args.model.split('/')[-1].lower()}_lb{args.index:03d}_s{args.seed}"
         cov_every, verify = args.cov_every, args.verify
     assert k_main in ks, "--k-main must be one of --ks"
@@ -371,6 +404,9 @@ def main(argv=None) -> dict:
     cap = (len(prompt) + steps) // PAGE + 2
     RECORDER = Recorder(n_layers, steps, k_max, ks, args.aggregate, cov_every, device, verify, cap)
     RECORDER.sparse_k = args.sparse_k
+    if args.token_k:
+        assert len(prompt) + steps < 65536, "token ids are stored as uint16"
+        RECORDER.enable_tokens(args.token_k, steps, device)
     sampler = make_sampler(args.temperature, args.top_k, args.top_p, args.seed, device)
     input_ids = torch.tensor([prompt], dtype=torch.long, device=device)
     print(f"[{name}] prompt {len(prompt):,} tokens, up to {steps} steps, {n_layers} layers, device {device}", flush=True)
@@ -386,6 +422,7 @@ def main(argv=None) -> dict:
         "prompt_tokens": len(prompt), "steps": n, "eos_reached": eos, "page_size": PAGE, "k_max": k_max, "ks": ks,
         "aggregate": args.aggregate, "forced_pages": ["sink page 0", "newest page"], "thinking": not args.no_thinking,
         "attention": f"sparse, first {args.sparse_k} ranked pages" if args.sparse_k else "full",
+        "token_k": args.token_k,
         "sampling": {"temperature": args.temperature, "top_k": args.top_k, "top_p": args.top_p}, "seed": args.seed,
         "coverage_every": cov_every, "coverage_samples": int(len(cov.get("step", []))), "prompt_info": prompt_info,
         "prefill_s": prefill_s, "decode_ms_per_step": 1e3 * decode_s / max(n, 1), "commit": git_commit(),
@@ -397,9 +434,14 @@ def main(argv=None) -> dict:
     out_dir, sum_dir = Path(args.out_dir), Path(args.summary_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     sum_dir.mkdir(parents=True, exist_ok=True)
+    extra = {}
+    if RECORDER.token_k:  # token positions as uint16; 65535 marks "no token" (contexts shorter than k)
+        for key in ("tok_prob", "tok_logit"):
+            arr = getattr(RECORDER, key)[:n].cpu().numpy()
+            extra[key] = np.where(arr < 0, 65535, arr).astype(np.uint16)
     np.savez_compressed(out_dir / f"{name}.npz", ranked=ranked, seq_len=seq_len,
                         prompt_ids=np.array(prompt, np.int32), tokens=np.array(tokens, np.int32),
-                        meta=np.array(json.dumps(meta)), **{f"cov_{k}": v for k, v in cov.items()})
+                        meta=np.array(json.dumps(meta)), **{f"cov_{k}": v for k, v in cov.items()}, **extra)
     summ = summarize(ranked, cov, ks, k_main)
     md = summary_markdown(name, meta, summ)
     (sum_dir / f"{name}.md").write_text(md, encoding="utf-8")

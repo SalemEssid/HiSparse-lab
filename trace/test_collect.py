@@ -119,6 +119,24 @@ def test_smoke_end_to_end():
         assert os.path.exists(os.path.join(tmp, "smoke.md")) and os.path.exists(os.path.join(tmp, "smoke.json"))
 
 
+def test_token_mode_traces():
+    with tempfile.TemporaryDirectory() as tmp:
+        res = collect.main(["--smoke", "--target-tokens", "300", "--steps", "30", "--token-k", "8",
+                            "--out-dir", tmp, "--summary-dir", tmp])
+        with np.load(os.path.join(tmp, "smoke.npz")) as d:
+            tp, tl, seq_len = d["tok_prob"], d["tok_logit"], d["seq_len"]
+        with open(os.path.join(tmp, "smoke.md"), encoding="utf-8") as f:
+            assert "Token-level selections" in f.read()
+    assert tp.dtype == np.uint16 and tp.shape == (30, 3, 8) and tl.shape == (30, 3, 8)
+    for arr in (tp, tl):
+        assert np.all(arr[:, :, 0] == (seq_len - 1)[:, None])  # the newest token leads
+        assert np.all(arr < seq_len[:, None, None])  # only tokens that exist
+        assert all(len(set(arr[t, l].tolist())) == 8 for t in range(30) for l in range(3))
+    cov = res["coverage"]
+    # The top tokens by mean attention weight are the best shared set, so they never cover less than by logit.
+    assert np.all(cov["tok_prob"] + 1e-6 >= cov["tok_logit"]) and np.all(cov["tok_prob"] <= 1 + 1e-6)
+
+
 def test_sparse_mode_traces():
     # Reading every page (k above the page count) must reproduce the full-attention trace exactly;
     # reading 2 pages must change the trajectory and therefore the later selections.

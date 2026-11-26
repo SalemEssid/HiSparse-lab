@@ -20,7 +20,21 @@ from quest import (  # noqa: E402
     quest_upper_bounds,
     rank_pages,
     rank_pages_per_head,
+    token_rankings,
 )
+
+
+def test_token_rankings_hand_example():
+    # 2 heads, 5 tokens (token 4 is the newest). Worked out on paper:
+    # mean logits: [2.0, 0.0, 3.0, 1.0, -9]          -> by logit (newest first): 4, 2, 0, 3, 1
+    # head 0 puts almost all weight on token 0, head 1 on token 2, both tiny on token 3:
+    # mean weights: token 0 ≈ 0.5, token 2 ≈ 0.5, token 3, 1 small -> by weight: 4, then {0, 2}, then 3, 1
+    logits = torch.tensor([[12.0, 0.0, -6.0, 1.0, -9.0],
+                           [-8.0, 0.0, 12.0, 1.0, -9.0]])
+    by_prob, by_logit = token_rankings(logits, k=3)
+    assert by_logit.tolist() == [4, 2, 0]
+    assert by_prob[0].item() == 4 and set(by_prob[1:].tolist()) == {0, 2}
+    assert token_rankings(logits, k=10)[0].numel() == 5  # k larger than the context
 
 
 def test_upper_bound_hand_example():
