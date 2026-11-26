@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# A1: page-level against token-level selection (repo root, GPU VM), about 45 minutes, unattended:
+# A1: page-level against token-level selection (repo root, GPU VM), about 15 minutes, unattended:
 #   1. tests                                                       (CPU, ~1 min)
 #   2. 3 prompts with token-level logging: structured data (fewest
 #      misses), dialogue (most), single-document QA                 (GPU, ~8 min)
-#   3. simulation of all three selection kinds                      (CPU, ~30 min)
+#   3. simulation of all three selection kinds                      (CPU, ~3 min)
 # Usage:  bash run_a1.sh            INDICES="1 6 56" by default; FORCE=1 skips the idle-GPU check
 set -uo pipefail
 cd "$(dirname "$0")"

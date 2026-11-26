@@ -167,7 +167,7 @@ def summary(results: list[dict], sp: dict, cov: dict) -> str:
     for t in traces:
         row = {r["kind"]: r for r in results if r["trace"] == t}
         lines.append(f"| {t} | " + " | ".join(pct(row[k]["miss_rate"]["lru"]) if k in row else "–" for k in kinds) + " |")
-    lines += ["", "## Traffic per decode step, all 36 layers, LRU at B = 2k (after the first step)", "",
+    lines += ["", f"## Traffic per decode step, all {results[0]['layers']} layers, LRU at B = 2k (after the first step)", "",
               "| Selection | Copies per step (mean / p99) | MiB per step (mean / p99) | Coverage of the true attention |",
               "| --- | --- | --- | --- |"]
     for kind in kinds:
